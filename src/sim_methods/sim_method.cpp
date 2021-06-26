@@ -477,5 +477,11 @@ sim_time_t Sim_Method::get_sim_time() const
   return m_sim_time;
 }
 
+sim_time_t Sim_Method::stop_sim() const
+{
+  m_max_time = m_sim_time;
+  m_max_iter = m_sim_iter;
+}
+
 /**@}*/
 } // end of namespace wcs

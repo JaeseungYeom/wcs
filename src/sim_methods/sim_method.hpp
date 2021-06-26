@@ -135,6 +135,8 @@ public:
   sim_iter_t get_sim_iter() const;
   sim_time_t get_sim_time() const;
 
+  void stop_sim();
+
 protected:
 
   /** The pointer to the reaction network being monitored.
