@@ -17,11 +17,35 @@
 #include "sim_methods/ssa_nrm.hpp"
 #include "sim_methods/ssa_direct.hpp"
 #include "sim_methods/ssa_sod.hpp"
+#include <csignal>
 
 #ifdef WCS_HAS_VTUNE
 __itt_domain* vtune_domain_sim = __itt_domain_create("Simulate");
 __itt_string_handle* vtune_handle_sim = __itt_string_handle_create("simulate");
 #endif // WCS_HAS_VTUNE
+
+wcs::Sim_Method* ssa = nullptr;
+double t_start; // simulation start time
+
+void signalHandler(int signum)
+{
+std::cout << "SIGTERM interruption " << signum << std::endl;
+ #if defined(_OPENMP)
+  #pragma omp master
+ #endif // defined(_OPENMP)
+  {
+    if (ssa != nullptr) {
+      ssa->finalize_recording();
+      signal(SIGTERM, SIG_DFL);
+      signal(SIGINT, SIG_DFL);
+    }
+    std::cout << "Wall clock time to run simulation: "
+              << wcs::get_time() - t_start << " (sec)" << std::endl;
+
+    delete ssa;
+  }
+  exit(signum);
+}
 
 
 int main(int argc, char** argv)
@@ -46,7 +70,7 @@ int main(int argc, char** argv)
     rc = EXIT_FAILURE;
   }
 
-  wcs::Sim_Method* ssa = nullptr;
+  ssa = nullptr;
 
   try {
     if (cfg.m_method == 0) {
@@ -85,13 +109,30 @@ int main(int argc, char** argv)
   }
   ssa->init(cfg.m_max_iter, cfg.m_max_time, cfg.m_seed);
 
+  if (cfg.m_tracing || cfg.m_sampling) {
+    signal(SIGTERM, signalHandler);
+    signal(SIGINT, signalHandler);
+  }
+
  #ifdef WCS_HAS_VTUNE
   __itt_resume();
   __itt_task_begin(vtune_domain_sim, __itt_null, __itt_null, vtune_handle_sim);
  #endif // WCS_HAS_VTUNE
 
-  double t_start = wcs::get_time();
-  ssa->run();
+  t_start = wcs::get_time();
+  try {
+    ssa->run();
+  } catch (...) {
+    {
+      if (cfg.m_tracing || cfg.m_sampling) {
+        ssa->finalize_recording();
+      }
+      std::cout << "Wall clock time to run simulation: "
+                << wcs::get_time() - t_start << " (sec)" << std::endl;
+    }
+    delete ssa;
+    return EXIT_FAILURE;
+  }
   std::cout << "Wall clock time to run simulation: "
             << wcs::get_time() - t_start << " (sec)" << std::endl;
 

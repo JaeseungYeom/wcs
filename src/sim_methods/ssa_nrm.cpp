@@ -437,7 +437,7 @@ Sim_Method::result_t SSA_NRM::schedule(revent_t& evt)
   evt = choose_reaction();
 
   if (BOOST_UNLIKELY(evt.first > m_max_time)) {
-    std::cerr << "No more reaction can fire." << std::endl;
+    //std::cerr << "Simulation complete." << std::endl;
     return Inactive;
   }
 

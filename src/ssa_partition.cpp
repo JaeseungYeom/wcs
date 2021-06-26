@@ -34,11 +34,14 @@
 #include "partition/metis_partition.hpp"
 #include "partition/partition_info.hpp"
 #include "sim_methods/ssa_nrm.hpp"
+#include <csignal>
 
 #ifdef WCS_HAS_VTUNE
 __itt_domain* vtune_domain_sim = __itt_domain_create("Simulate");
 __itt_string_handle* vtune_handle_sim = __itt_string_handle_create("simulate");
 #endif // WCS_HAS_VTUNE
+
+struct WCS_LP_State;
 
 /// Shared state
 struct WCS_Shared_State {
@@ -46,6 +49,8 @@ struct WCS_Shared_State {
   wcs::sim_iter_t m_max_iter; ///< maximum simulation steps
   int m_nparts;
   int m_num_inner_threads;
+  const WCS_LP_State* m_master_state;
+  double m_t_beg; ///< Simulation start time
 
   void set_num_partitions(int np);
 };
@@ -80,7 +85,7 @@ struct WCS_LP_State
   /// Pointer to the reaction network
   std::shared_ptr<wcs::Network> m_net_ptr;
   /// Simulation start time (wall clock)
-  double m_t_start;
+  double m_t_beg;
 
   WCS_LP_State(std::unique_ptr<wcs::SSA_NRM>&& ssa_ptr,
                std::shared_ptr<wcs::Network>& net_ptr);
@@ -93,7 +98,7 @@ struct WCS_LP_State
 
 WCS_LP_State::WCS_LP_State(std::unique_ptr<wcs::SSA_NRM>&& ssa_ptr,
                            std::shared_ptr<wcs::Network>& net_ptr)
-: m_ssa_ptr(std::move(ssa_ptr)), m_net_ptr(net_ptr), m_t_start(0.0)
+: m_ssa_ptr(std::move(ssa_ptr)), m_net_ptr(net_ptr), m_t_beg(0.0)
 {}
 
 #if defined(_OPENMP) && defined(WCS_OMP_RUN_PARTITION)
@@ -132,6 +137,29 @@ void wcs_init(const wcs::SSA_Params& cfg, const partition_idx_t& parts);
 
 std::pair<wcs::sim_iter_t, wcs::sim_time_t> wcs_run();
 
+template <typename SSA>
+void wrapup(SSA& ssa)
+{
+    signal(SIGINT,  SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGABRT, SIG_DFL);
+    ssa.stop_sim();
+}
+
+void signalHandler(int signum)
+{
+  if (shared_state.m_master_state == nullptr) {
+    std::cout << "Wall clock time to run simulation: "
+              << wcs::get_time() - shared_state.m_t_beg
+              << " (sec)" << std::endl;
+    exit(signum);
+  } else {
+    std::cout << "Interrupt signal (" << signum << ") received.\n";
+    auto& ssa = *(shared_state.m_master_state->m_ssa_ptr);
+    shared_state.m_master_state = nullptr;
+    wrapup(ssa);
+  }
+}
 
 int main(int argc, char** argv)
 {
@@ -167,8 +195,16 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
+  shared_state.m_master_state = nullptr;
+
  // ......................... SIMULATION BEGINS ................................
  #if defined(_OPENMP) && defined(WCS_OMP_RUN_PARTITION)
+  if (sp.m_tracing || sp.m_sampling) {
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
+    signal(SIGABRT, signalHandler);
+    shared_state.m_master_state = &lp_state;
+  }
   wcs_init(sp, parts);
 
   std::cout << "Initialization complete. Simulation begins ..." << std::endl;
@@ -178,10 +214,24 @@ int main(int argc, char** argv)
   __itt_task_begin(vtune_domain_sim, __itt_null, __itt_null, vtune_handle_sim);
  #endif // WCS_HAS_VTUNE
 
-  double t_start = wcs::get_time();
-  wcs_run();
+  shared_state.m_t_beg = wcs::get_time();
+  try {
+    wcs_run();
+    if (sp.m_tracing || sp.m_sampling) {
+      signal(SIGINT,  SIG_DFL);
+      signal(SIGTERM, SIG_DFL);
+      signal(SIGABRT, SIG_DFL);
+    }
+  } catch (...) {
+    if (sp.m_tracing || sp.m_sampling) {
+      auto& ssa = *(lp_state.m_ssa_ptr);
+      ssa.finalize_recording();
+    }
+    ssa.stop_sim();
+  }
   std::cout << "Wall clock time to run simulation: "
-            << wcs::get_time() - t_start << " (sec)" << std::endl;
+            << wcs::get_time() - shared_state.m_t_beg << " (sec)" << std::endl;
+
  #ifdef WCS_HAS_VTUNE
   __itt_task_end(vtune_domain_sim);
   __itt_pause();
@@ -273,7 +323,7 @@ void wcs_init(const wcs::SSA_Params& cfg, const partition_idx_t& parts)
     ssa.init(cfg.m_max_iter, cfg.m_max_time, cfg.m_seed);
     ssa.m_lp_idx = tid;
 
-    lp_state.m_t_start = wcs::get_time();
+    lp_state.m_t_beg = wcs::get_time();
   }
 
  #if OMP_DEBUG
